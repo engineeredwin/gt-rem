@@ -111,3 +111,53 @@ try {
 finally {
     $keyStore.Close()
 }
+
+
+
+
+
+# JKS keystore details
+$keyStorePath = "keystore.jks"
+$keyStorePassword = "KEYSTORE_PASSWORD"
+
+# Target server
+$targetServer = "TARGET_SERVER"
+
+# Generate keystore
+$keytoolPath = "keytool.exe"
+$keytoolArgs = "-genkeypair -alias $targetServer -keyalg RSA -keysize 2048 -keystore $keyStorePath -storepass $keyStorePassword -dname ""CN=$targetServer"""
+$keytoolCommand = "$keytoolPath $keytoolArgs"
+Invoke-Expression -Command $keytoolCommand
+
+# Generate CSR
+$certCSRFile = "$CertPath$targetServer.csr"
+$keytoolArgs = "-certreq -alias $targetServer -keystore $keyStorePath -storepass $keyStorePassword -file $certCSRFile"
+$keytoolCommand = "$keytoolPath $keytoolArgs"
+Invoke-Expression -Command $keytoolCommand
+
+switch ($requestType) {
+    "create" {
+        request-cert -VEDServer $VEDServer -certParentDN $certParentDN -certCommonName $certCommonName -certCADN $certCADN -CertCSRFile $certCSRFile -cre $cre
+        $signedCert = download-cert -VEDServer $VEDServer -certParentDN $certParentDN -certCommonName $certCommonName -certCADN $certCADN -credential $cre
+        $signedCert.certData | Out-File -FilePath "$CertPath$targetServer.cer"
+        if ($apply_cert) {
+            apply-cert -filePath "$CertPath$targetServer.cer"
+        }
+        break
+    }
+    "renew" {
+        renew-cert -VEDServer $VEDServer -certParentDN $certParentDN -certCommonName $certCommonName -certCADN $certCADN -CertCSRFile $certCSRFile -credential $credential
+        $signedCert = download-cert -VEDServer $VEDServer -certParentDN $certParentDN -certCommonName $certCommonName -certCADN $certCADN -credential $credential
+        $signedCert.certData | Out-File -FilePath "$CertPath$targetServer.cer"
+        if ($apply_cert) {
+            apply-cert -filePath "$CertPath$targetServer.cer"
+        }
+        break
+    }
+}
+
+
+
+
+
+
