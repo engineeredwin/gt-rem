@@ -1,163 +1,129 @@
-param(
-    [Parameter(Mandatory=$true)]
-    [ValidateNotNullOrEmpty()]
-    [string] $VEDServer,
+---
+- name: Create the SSL Certificate
+  vars:
+    hostName: "{{ ansible_host }}"
+  hosts: all
+  gather_facts: no
+  tasks:
+  - name: Gather ansible_distribution fact
+    setup:
+      gather_subset: min
+    when: ansible_distribution is not defined
+  
+  - name: Set facts
+    set_fact:
+      certName: "{{ hostName ~ '.nml.com' }}"
+      certReqFile: "{{ hostName ~ '.nml.com.csr' }}"
+      sslTempDir: "/nmlpkgs/informatica/software/autobuild_pkgs/pwrctr_105/sslCertRenewal"
+      appliedssslDir: "/nmlpkgs/informatica/software/autobuild_pkgs/pwrctr_105/appliedCerts"
+      appEnv: "{{ (ansible_host is regex('lxp.*')) | ternary('prod','test') }}"
+      certTemplate: "{{ (ansible_host is not regex('lxp.*')) | ternary('NM Test Issuing CA2 SSL Code 1 - NM-SSL [Delegated Access]','NM Issuing CA2 SSL Code 1 - NM-SSL [Delegated Access]') }}" 
 
-    [Parameter(Mandatory=$true)]
-    [ValidateNotNullOrEmpty()]
-    [string] $certParentDN,
+  - name: Clean SSL directory
+    file:
+      path: "{{ sslTempDir }}/"
+      state: absent
+  # ignore_errors: true
 
-    [Parameter(Mandatory=$true)]
-    [ValidateNotNullOrEmpty()]
-    [string] $certCommonName,
-
-    [Parameter(Mandatory=$true)]
-    [string] $certCADN,
-
-    [Parameter(Mandatory=$true)]
-    [ValidateNotNullOrEmpty()]
-    [string] $keyStorePath,
-
-    [Parameter(Mandatory=$true)]
-    [ValidateNotNullOrEmpty()]
-    [string] $keyStorePassword,
-
-    [Parameter(Mandatory=$true)]
-    [ValidateNotNullOrEmpty()]
-    [string] $targetServer,
-
-    [Parameter(Mandatory=$true)]
-    [System.Management.Automation.PSCredential] $credential
-)
-
-# Create a keystore and generate a private key
-$keyStoreType = "JKS"
-$keyPairAlgorithm = "RSA"
-$privateKeyAlgorithm = "RSA"
-$keySize = 2048
-
-$keyStore = New-Object -TypeName "System.Security.Cryptography.X509Certificates.X509Store" -ArgumentList "My", "LocalMachine"
-$keyStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-
-$certificateRequest = New-Object -TypeName "System.Security.Cryptography.X509Certificates.X509Certificate2"
-
-try {
-    $keyParams = New-Object -TypeName "System.Security.Cryptography.CspParameters"
-    $keyParams.KeyContainerName = [System.Guid]::NewGuid().ToString()
-    $keyParams.KeyNumber = [System.Security.Cryptography.KeyNumber]::Exportable
-    $keyParams.ProviderType = 1
-
-    $rsa = New-Object -TypeName "System.Security.Cryptography.RSACryptoServiceProvider" -ArgumentList $keySize, $keyParams
-
-    $certificateRequest.PrivateKey = $rsa
-
-    # Generate a CSR
-    $subjectName = New-Object -TypeName "System.Security.Cryptography.X509Certificates.X500DistinguishedName" -ArgumentList "CN=$certCommonName"
-    $certificateRequest.Subject = $subjectName
-    $certificateRequest.SignatureAlgorithm = [System.Security.Cryptography.X509Certificates.X509SignatureAlgorithm]::Sha256
-    $certificateRequest.NotBefore = [System.DateTime]::Now.AddDays(-1)
-    $certificateRequest.NotAfter = [System.DateTime]::Now.AddYears(1)
-
-    $csr = $certificateRequest.CreateSigningRequest()
-
-    # Save the private key and CSR to the keystore
-    $keyStorePath = Resolve-Path $keyStorePath
-    $keyStoreFilePath = Join-Path -Path $keyStorePath -ChildPath "private_key.jks"
-
-    $password = ConvertTo-SecureString -String $keyStorePassword -AsPlainText -Force
-    $keyStoreObject = New-Object -TypeName "System.Security.Cryptography.X509Certificates.X509Store" -ArgumentList "My", "CurrentUser"
-    $keyStoreObject.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-
-    $certEntry = New-Object -TypeName "System.Security.Cryptography.X509Certificates.X509Certificate2" -ArgumentList $certificateRequest.RawData
-    $keyStoreObject.Add($certEntry)
-
-    $keyStoreObject.Close()
-
-    $keyStoreInfo = New-Object -TypeName "System.Security.Cryptography.X509Certificates.X509KeyStorageFlags"
-    $keyStoreInfo = $keyStoreInfo -bor [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
-    $keyStoreInfo = $keyStoreInfo -bor [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet
-
-    $certificateRequest.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pkcs12, $password) | Set-Content -Path $keyStoreFilePath -Encoding Byte
-
-    # Send the CSR to Venafi and retrieve the certificate
-    Connect-VEDService -server $VEDServer -credential $credential
-    $service = Get-VEDService
-
-    $csrBase64 = [System.Convert]::ToBase64String($csr)
-    $certDN = "{0},{1}" -f $certCommonName, $certParentDN
-
-    try {
-        $certificate = Create-VEDCertificate -service $service -CADN $certCADN -CSR $csrBase64 -DN $certDN -targetServer $targetServer
-        $certificatePath = Join-Path -Path $keyStorePath -ChildPath "certificate.p7b"
-        $certificate | Export-VEDCertificate -Path $certificatePath
-
-        $certificateData = Get-Content -Path $certificatePath -Raw
-        $certificateObject = New-Object -TypeName "System.Security.Cryptography.X509Certificates.X509Certificate2" -ArgumentList $certificateData
-
-        $keyStoreObject = New-Object -TypeName "System.Security.Cryptography.X509Certificates.X509Store" -ArgumentList "My", "CurrentUser"
-        $keyStoreObject.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-        $keyStoreObject.Add($certificateObject)
-        $keyStoreObject.Close()
-
-        Write-Host "Certificate DN: $certDN"
-    }
-    catch {
-        Write-Host -ForegroundColor Red "ERROR: Failed to create certificate. Message: $($_)"
-    }
-    finally {
-        Disconnect-VEDService -service $service
-    }
-}
-finally {
-    $keyStore.Close()
-}
+  - name: Create SSL directory
+    file:
+      path: "{{ sslTempDir }}/"
+      state: directory
+      group: powerctg
+      mode: '0775'
 
 
+  - name: Create Cert Request
+    shell: |
+      openssl req -new -newkey rsa:2048 -nodes -sha256 -keyout {{ hostName ~ '.nml.com.key' }} -out {{ hostName ~ '.nml.com.csr' }} -subj "/O=Northwestern Mutual/OU=ETM/L=Milwaukee/ST=WI/C=US/CN={{ hostName ~ '.nml.com' }}"
+    args:
+      chdir: "{{ sslTempDir }}/"
+    changed_when: true
+    # ignore_errors: true
 
 
+  - name: Include Venafi Vault
+    include_vars: vars/auth.json
+    #--ask-vault-pass
+  - name: Renew the SSL Certificate
+    block:
+      - name: Renew the SSL Certificate
+        include_role:
+          name: pki-renew-cert-wt
+        vars:
+          app_environment: test
+          venafi_environment: test
+          include_chain: false
+          download_directory: "{{ sslTempDir }}/"
+          object_name: "{{ certName }}"
+          venafi_dir: "Informatica"
+          csr_filename: "{{ sslTempDir }}/{{ certReqFile }}"
+          cert_format: Base64
+          validate_certs: false
+    rescue:
+    - name: Create the SSL Certificate
+      include_role:
+        name: pki-request-cert-wt
+      vars:
+        app_environment: test
+        venafi_environment: test
+        cert_template: "{{ certTemplate }}"
+        include_chain: false
+        download_directory: "{{ sslTempDir }}/"
+        object_name: "{{ certName }}"
+        venafi_dir: "Informatica"
+        csr_filename: "{{ sslTempDir }}/{{ certReqFile }}"
+        cert_format: Base64
+        validate_certs: false
+        
+#--ask-vault-pass
 
-# JKS keystore details
-$keyStorePath = "keystore.jks"
-$keyStorePassword = "KEYSTORE_PASSWORD"
+#  - name: Change the Certificate cer Ownership and Permissions
+#    file:
+#      path: |
+#         "{{ sslTempDir }}/{{ certName ~ '.cer' }}"
+#      group: powerctg  
+#      mode: '0775'
 
-# Target server
-$targetServer = "TARGET_SERVER"
+#  - name: Change the Certificate key Ownership and Permissions
+#    file:
+#      path: |
+#         "{{ sslTempDir }}/{{ certName ~ '.key' }}"
+#      group: powerctg  
+#      mode: '0775'
 
-# Generate keystore
-$keytoolPath = "keytool.exe"
-$keytoolArgs = "-genkeypair -alias $targetServer -keyalg RSA -keysize 2048 -keystore $keyStorePath -storepass $keyStorePassword -dname ""CN=$targetServer"""
-$keytoolCommand = "$keytoolPath $keytoolArgs"
-Invoke-Expression -Command $keytoolCommand
+#  - name: Change the Certificate csr Ownership and Permissions
+#    file:
+#      path: |
+#         "{{ sslTempDir }}/{{ certName ~ '.csr' }}"
+#      group: powerctg  
+#      mode: '0775'
 
-# Generate CSR
-$certCSRFile = "$CertPath$targetServer.csr"
-$keytoolArgs = "-certreq -alias $targetServer -keystore $keyStorePath -storepass $keyStorePassword -file $certCSRFile"
-$keytoolCommand = "$keytoolPath $keytoolArgs"
-Invoke-Expression -Command $keytoolCommand
-
-switch ($requestType) {
-    "create" {
-        request-cert -VEDServer $VEDServer -certParentDN $certParentDN -certCommonName $certCommonName -certCADN $certCADN -CertCSRFile $certCSRFile -cre $cre
-        $signedCert = download-cert -VEDServer $VEDServer -certParentDN $certParentDN -certCommonName $certCommonName -certCADN $certCADN -credential $cre
-        $signedCert.certData | Out-File -FilePath "$CertPath$targetServer.cer"
-        if ($apply_cert) {
-            apply-cert -filePath "$CertPath$targetServer.cer"
-        }
-        break
-    }
-    "renew" {
-        renew-cert -VEDServer $VEDServer -certParentDN $certParentDN -certCommonName $certCommonName -certCADN $certCADN -CertCSRFile $certCSRFile -credential $credential
-        $signedCert = download-cert -VEDServer $VEDServer -certParentDN $certParentDN -certCommonName $certCommonName -certCADN $certCADN -credential $credential
-        $signedCert.certData | Out-File -FilePath "$CertPath$targetServer.cer"
-        if ($apply_cert) {
-            apply-cert -filePath "$CertPath$targetServer.cer"
-        }
-        break
-    }
-}
+  # - name: Change characterset of Venafi cert
+  #   command: dos2unix  "{{ sslTempDir }}/{{ hostName ~ '.nml.com.cer' }}" 
+  
+  - name: copy certs from temp cert path to applied cert path
+    copy: 
+      src: "{{ sslTempDir }}/{{ hostName ~ '.nml.com.cer' }}"
+      dest: "{{ appliedssslDir }}/{{ hostName ~ '.nml.com.cer' }}"
+      remote_src: yes
+      owner: infautot
+      group: powerctg
+      mode: '0775'
+    changed_when: false
+    register: result
+    failed_when: result.failed
 
 
+  # - name: copy certs from temp cert path to applied cert path
+  #   command: cp "{{ sslTempDir }}/{{ hostName ~ '.nml.com.cer' }}" "{{ appliedssslDir }}/{{ hostName ~ '.nml.com.cer' }}"
+  #   changed_when: false
+  #   register: result
+  #   failed_when: result.failed
 
 
-
-
+  - name: Set stats for next step of renewal pipeline
+    set_stats:
+      data:
+        ssl_cutover_limit: "{{ ansible_play_hosts }}"
+    run_once: true
